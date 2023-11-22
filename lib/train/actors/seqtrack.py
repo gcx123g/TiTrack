@@ -186,10 +186,10 @@ class SeqTrackActor(BaseActor):
             status  -  dict containing detailed losses
         """
         # forward pass
-        outputs, target_seqs = self.forward_pass(data)
+        outputs, targets = self.forward_pass(data)
 
         # compute losses
-        loss, status = self.compute_losses(outputs, target_seqs)
+        loss, status = self.compute_losses(outputs, targets)
 
         return loss, status
 
@@ -204,15 +204,14 @@ class SeqTrackActor(BaseActor):
         # crop list[b*, n, c, h, w]
         z_list = self.tem_crop(template_images, template_anno)
         x_list, seq_list = self.search_crop(search_images, search_anno)
-        bbox_list = [torch.from_numpy(search_bbox).unsqueeze(0) for search_bbox in data['search_anno']]
+        bbox_list = [torch.from_numpy(search_bbox)[-1] for search_bbox in data['search_anno']]
 
         feature_xz = self.net(z_list, x_list, mode='encoder')  # forward the encoder
 
-        bins = self.BINS  # coordinate token
-
         outputs = self.net(xz=feature_xz, seq=seq_list, mode="decoder")
+        targets = torch.stack(bbox_list, 0)
 
-        return outputs
+        return outputs, targets
 
     def compute_losses(self, outputs, targets_seq, return_status=True):
         # Get loss

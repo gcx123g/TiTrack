@@ -40,12 +40,6 @@ class SEQTRACK(nn.Module):
         self.num_template = num_template
         self.feature_type = feature_type
 
-        # Different type of visual features for decoder.
-        # position embeding for the decocder
-        self.pos_embed = nn.Parameter(torch.zeros(1, self.num_patch_x, hidden_dim))
-        pos_embed = get_sinusoid_encoding_table(self.num_patch_x, self.pos_embed.shape[-1], cls_token=False)
-        self.pos_embed.data.copy_(torch.from_numpy(pos_embed).float().unsqueeze(0))
-
     def forward(self, z_list=None, x_list=None, xz=None, seq=None, mode="encoder"):
         """
         image_list: list of template and search images, template images should precede search images
@@ -71,8 +65,9 @@ class SEQTRACK(nn.Module):
         dec_mem = xz[:, -self.num_patch_x:, :]
         sequence = torch.stack(sequence_list, 0).permute(1, 0, 2, 3, 4).squeeze(0)
 
-        out = self.decoder(dec_mem, self.pos_embed.permute(1, 0, 2).expand(-1, B, -1), sequence)
-        out = self.vocab_embed(out)  # embeddings --> likelihood of words
+        if dec_mem.shape[-1] != self.hidden_dim:
+            dec_mem = self.bottleneck(dec_mem)  # [B,NL,D]
+        out = self.decoder(dec_mem, sequence)
         return out
 
 

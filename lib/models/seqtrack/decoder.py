@@ -6,11 +6,36 @@ Decoder for SeqTrack, modified from DETR transformer class.
 import copy
 from typing import Optional
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from timm.models.layers import to_2tuple
 from torch import Tensor
 import torch.nn as nn
+from lib.utils.pos_embed import get_sinusoid_encoding_table
+
+
+class DecoderEmbeddings(nn.Module):
+    def __init__(self, vocab_size, hidden_dim, max_position_embeddings, dropout):
+        super().__init__()
+        self.word_embeddings = nn.Embedding(
+            vocab_size, hidden_dim)
+        self.position_embeddings = nn.Embedding(
+            max_position_embeddings, hidden_dim
+        )
+
+        self.LayerNorm = torch.nn.LayerNorm(
+            hidden_dim)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+        input_embeds = self.word_embeddings(x)
+        embeddings = input_embeds
+
+        embeddings = self.LayerNorm(embeddings)
+        embeddings = self.dropout(embeddings)
+
+        return embeddings
 
 
 class PatchEmbed(nn.Module):
@@ -37,29 +62,6 @@ class PatchEmbed(nn.Module):
         return x
 
 
-class DecoderEmbeddings(nn.Module):
-    def __init__(self, vocab_size, hidden_dim, max_position_embeddings, dropout):
-        super().__init__()
-        self.word_embeddings = nn.Embedding(
-            vocab_size, hidden_dim)
-        self.position_embeddings = nn.Embedding(
-            max_position_embeddings, hidden_dim
-        )
-
-        self.LayerNorm = torch.nn.LayerNorm(
-            hidden_dim)
-        self.dropout = nn.Dropout(dropout)
-
-    def forward(self, x):
-        input_embeds = self.word_embeddings(x)
-        embeddings = input_embeds
-
-        embeddings = self.LayerNorm(embeddings)
-        embeddings = self.dropout(embeddings)
-
-        return embeddings
-
-
 class SeqTrackDecoder(nn.Module):
 
     def __init__(self, d_model=512, nhead=8,
@@ -67,19 +69,40 @@ class SeqTrackDecoder(nn.Module):
                  activation="relu", normalize_before=False,
                  return_intermediate_dec=False, bins=1000, num_frames=9):
         super().__init__()
-        self.bins = bins
         self.num_frames = num_frames
-        self.num_coordinates = 4  # [x,y,w,h]
-        max_position_embeddings = (self.num_coordinates + 1) * num_frames
-        self.embedding = DecoderEmbeddings(bins + 2, d_model, max_position_embeddings, dropout)
-        self.patch_embed = PatchEmbed(
-            img_size=256, patch_size=16, in_chans=3, embed_dim=768)
 
-        decoder_layer = TransformerDecoderLayer(d_model, nhead, dim_feedforward,
+        self.patch_embed = PatchEmbed(img_size=d_model, patch_size=16, in_chans=3, embed_dim=d_model)
+
+        self.sa_layer = TransformerDecoderLayer(d_model, nhead, dim_feedforward,
                                                 dropout, activation, normalize_before)
-        decoder_norm = nn.LayerNorm(d_model)
-        self.body = TransformerDecoder(decoder_layer, num_decoder_layers, decoder_norm,
-                                       return_intermediate=return_intermediate_dec)
+        self.cross_layer = TransformerDecoderLayer(d_model, nhead, dim_feedforward,
+                                                dropout, activation, normalize_before)
+        self.decoder_norm = nn.LayerNorm(d_model)
+
+        self.num = 256
+        self.pos_embed_src = nn.Parameter(torch.zeros(1, self.num, d_model))
+        pos_embed_src = get_sinusoid_encoding_table(self.num, self.pos_embed_src.shape[-1], cls_token=False)
+        self.pos_embed_src.data.copy_(torch.from_numpy(pos_embed_src).float().unsqueeze(0))
+
+        self.pos_embed = nn.Parameter(torch.zeros(1, self.num, d_model))
+        pos_embed = get_sinusoid_encoding_table(self.num, self.pos_embed.shape[-1], cls_token=False)
+        self.pos_embed.data.copy_(torch.from_numpy(pos_embed).float().unsqueeze(0))
+
+        self.pos_embed1 = nn.Parameter(torch.zeros(1, self.num+1, d_model))
+        pos_embed1 = get_sinusoid_encoding_table(self.num+1, self.pos_embed1.shape[-1], cls_token=False)
+        self.pos_embed1.data.copy_(torch.from_numpy(pos_embed1).float().unsqueeze(0))
+
+        self.pos_embed2 = nn.Parameter(torch.zeros(1, self.num+2, d_model))
+        pos_embed2 = get_sinusoid_encoding_table(self.num+2, self.pos_embed2.shape[-1], cls_token=False)
+        self.pos_embed2.data.copy_(torch.from_numpy(pos_embed2).float().unsqueeze(0))
+
+        self.pos_embed3 = nn.Parameter(torch.zeros(1, self.num+3, d_model))
+        pos_embed3 = get_sinusoid_encoding_table(self.num+3, self.pos_embed3.shape[-1], cls_token=False)
+        self.pos_embed3.data.copy_(torch.from_numpy(pos_embed3).float().unsqueeze(0))
+
+        self.cx_embeddings= DecoderEmbeddings(2, d_model, 10, dropout)
+        self.cy_embeddings = DecoderEmbeddings(2, d_model, 10, dropout)
+        self.w_embeddings = DecoderEmbeddings(2, d_model, 10, dropout)
 
         self._reset_parameters()
 
@@ -91,59 +114,56 @@ class SeqTrackDecoder(nn.Module):
             if p.dim() > 1:
                 nn.init.xavier_uniform_(p)
 
-    def forward(self, src, pos_embed, seq):
+    def forward(self, src, seq):
         # flatten NxCxHxW to HWxNxC
+        b = src.shape[0]
         src = src.permute(1, 0, 2)
+        pos_embed_src = self.pos_embed_src.permute(1, 0, 2)
         seq = self.patch_embed(seq).permute(1, 0, 2)
+        pos_embed = self.pos_embed.permute(1, 0, 2)
 
-        tgt = src
-        memory = seq
-        # two self_attention for memory; two cross_attention for tgt memory
-        hs = self.body(tgt, memory, pos=pos_embed, query_pos=pos_embed)
+        # two self_attention for seq; two cross_attention for tgt memory
+        for i in range(2):
+            seq = self.sa_layer(seq, seq, pos_embed, pos_embed)
 
-        return hs.transpose(1, 2)
+        cx, cy, cw, ch = None, None, None, None
+        for i in range(4):
+            src = self.cross_layer(tgt=src, memory=seq, pos=pos_embed, query_pos=pos_embed_src)
+            img = src.permute(1, 0, 2)
 
+            if i == 0:
+                value, cx_tmp = torch.topk(img.softmax(-2).to(img), 1, -2)
+                value, cx_tmp = torch.topk(value.squeeze(-2), 1, -1)
+                cx = cx_tmp
+                cx_tmp = (cx_tmp+1)/256
+                cx_seq = self.cx_embeddings(cx_tmp.long()).permute(1, 0, 2)
+                seq = torch.cat((seq, cx_seq), 0)
+                pos_embed = self.pos_embed1.permute(1, 0, 2)
 
-class TransformerDecoder(nn.Module):
+            elif i == 1:
+                value, cy_tmp = torch.topk(img.softmax(-1).to(img), 1, -1)
+                value, cy_tmp = torch.topk(value.squeeze(-1), 1, -1)
+                cy = cy_tmp
+                cy_tmp = (cy_tmp+1)/256
+                cy_seq = self.cy_embeddings(cy_tmp.long()).permute(1, 0, 2)
+                seq = torch.cat((seq, cy_seq), 0)
+                pos_embed = self.pos_embed2.permute(1, 0, 2)
 
-    def __init__(self, decoder_layer, num_layers, norm=None, return_intermediate=False):
-        super().__init__()
-        self.layers = _get_clones(decoder_layer, num_layers)
-        self.num_layers = num_layers
-        self.norm = norm
-        self.return_intermediate = return_intermediate
-
-    def forward(self, tgt, memory,
-                tgt_mask: Optional[Tensor] = None,
-                memory_mask: Optional[Tensor] = None,
-                tgt_key_padding_mask: Optional[Tensor] = None,
-                memory_key_padding_mask: Optional[Tensor] = None,
-                pos: Optional[Tensor] = None,
-                query_pos: Optional[Tensor] = None):
-        output = tgt
-
-        intermediate = []
-
-        for layer in self.layers:
-            output = layer(output, memory, tgt_mask=tgt_mask,
-                           memory_mask=memory_mask,
-                           tgt_key_padding_mask=tgt_key_padding_mask,
-                           memory_key_padding_mask=memory_key_padding_mask,
-                           pos=pos, query_pos=query_pos)
-
-            if self.return_intermediate:
-                intermediate.append(self.norm(output))
-
-        if self.norm is not None:
-            output = self.norm(output)
-            if self.return_intermediate:
-                intermediate.pop()
-                intermediate.append(output)
-
-        if self.return_intermediate:
-            return torch.stack(intermediate)
-
-        return output.unsqueeze(0)
+            elif i == 2:
+                value, cy_tmp = torch.topk(img.softmax(-1).to(img), 1, -1)
+                value, cy_tmp = torch.topk(value.squeeze(-1), 1, -1)
+                cw = value*256
+                w = value
+                w_seq = self.w_embeddings(w.long()).permute(1, 0, 2)
+                seq = torch.cat((seq, w_seq), 0)
+                pos_embed = self.pos_embed3.permute(1, 0, 2)
+            elif i == 3:
+                value, cy_tmp = torch.topk(img.softmax(-1).to(img), 1, -1)
+                value, cy_tmp = torch.topk(value.squeeze(-1), 1, -1)
+                ch = value*256
+                h = value
+        out = torch.cat((cx, cy, cw, ch), -1)
+        return out
 
 
 class TransformerDecoderLayer(nn.Module):
@@ -171,22 +191,14 @@ class TransformerDecoderLayer(nn.Module):
     def with_pos_embed(self, tensor, pos: Optional[Tensor]):
         return tensor if pos is None else tensor + pos
 
-    def forward_post(self, tgt, memory,
-                     tgt_mask: Optional[Tensor] = None,
-                     memory_mask: Optional[Tensor] = None,
-                     tgt_key_padding_mask: Optional[Tensor] = None,
-                     memory_key_padding_mask: Optional[Tensor] = None,
-                     pos: Optional[Tensor] = None,
-                     query_pos: Optional[Tensor] = None):
+    def forward(self, tgt, memory, pos: Optional[Tensor] = None, query_pos: Optional[Tensor] = None):
         q = k = self.with_pos_embed(tgt, query_pos)
-        tgt2 = self.self_attn(q, k, tgt, attn_mask=tgt_mask,
-                              key_padding_mask=tgt_key_padding_mask)[0]
+        tgt2 = self.self_attn(q, k, tgt)[0]
         tgt = tgt + self.dropout1(tgt2)
         tgt = self.norm1(tgt)
         tgt2 = self.multihead_attn(self.with_pos_embed(tgt, query_pos),
                                    self.with_pos_embed(memory, pos),
-                                   memory, attn_mask=memory_mask,
-                                   key_padding_mask=memory_key_padding_mask)[0]
+                                   memory)[0]
 
         tgt = tgt + self.dropout2(tgt2)
         tgt = self.norm2(tgt)
@@ -195,42 +207,6 @@ class TransformerDecoderLayer(nn.Module):
         tgt = self.norm3(tgt)
 
         return tgt
-
-    def forward_pre(self, tgt, memory,
-                    tgt_mask: Optional[Tensor] = None,
-                    memory_mask: Optional[Tensor] = None,
-                    tgt_key_padding_mask: Optional[Tensor] = None,
-                    memory_key_padding_mask: Optional[Tensor] = None,
-                    pos: Optional[Tensor] = None,
-                    query_pos: Optional[Tensor] = None):
-        tgt2 = self.norm1(tgt)
-        q = k = self.with_pos_embed(tgt2, query_pos)
-        tgt2 = self.self_attn(q, k, tgt2, attn_mask=tgt_mask,
-                              key_padding_mask=tgt_key_padding_mask)[0]
-        tgt = tgt + self.dropout1(tgt2)
-        tgt2 = self.norm2(tgt)
-        tgt2 = self.multihead_attn(self.with_pos_embed(tgt2, query_pos),
-                                   self.with_pos_embed(memory, pos),
-                                   memory, attn_mask=memory_mask,
-                                   key_padding_mask=memory_key_padding_mask)[0]
-        tgt = tgt + self.dropout2(tgt2)
-        tgt2 = self.norm3(tgt)
-        tgt2 = self.linear2(self.dropout(self.activation(self.linear1(tgt2))))
-        tgt = tgt + self.dropout3(tgt2)
-        return tgt
-
-    def forward(self, tgt, memory,
-                tgt_mask: Optional[Tensor] = None,
-                memory_mask: Optional[Tensor] = None,
-                tgt_key_padding_mask: Optional[Tensor] = None,
-                memory_key_padding_mask: Optional[Tensor] = None,
-                pos: Optional[Tensor] = None,
-                query_pos: Optional[Tensor] = None):
-        if self.normalize_before:
-            return self.forward_pre(tgt, memory, tgt_mask, memory_mask,
-                                    tgt_key_padding_mask, memory_key_padding_mask, pos, query_pos)
-        return self.forward_post(tgt, memory, tgt_mask, memory_mask,
-                                 tgt_key_padding_mask, memory_key_padding_mask, pos, query_pos)
 
 
 def _get_clones(module, N):
