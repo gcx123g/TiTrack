@@ -8,8 +8,33 @@ from typing import Optional
 
 import torch
 import torch.nn.functional as F
+from timm.models.layers import to_2tuple
 from torch import Tensor
 import torch.nn as nn
+
+
+class PatchEmbed(nn.Module):
+    """ Image to Patch Embedding
+    """
+
+    def __init__(self, img_size=224, patch_size=16, in_chans=3, embed_dim=768):
+        super().__init__()
+        img_size = to_2tuple(img_size)
+        patch_size = to_2tuple(patch_size)
+        num_patches = (img_size[1] // patch_size[1]) * (img_size[0] // patch_size[0])
+        self.img_size = img_size
+        self.patch_size = patch_size
+        self.num_patches = num_patches
+
+        self.proj = nn.Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size)
+
+    def forward(self, x):
+        # B, C, H, W = x.shape
+        # # FIXME look at relaxing size constraints
+        # assert H == self.img_size[0] and W == self.img_size[1], \
+        #     f"Input image size ({H}*{W}) doesn't match model ({self.img_size[0]}*{self.img_size[1]})."
+        x = self.proj(x).flatten(2).transpose(1, 2)
+        return x
 
 
 class DecoderEmbeddings(nn.Module):
@@ -44,15 +69,17 @@ class SeqTrackDecoder(nn.Module):
         super().__init__()
         self.bins = bins
         self.num_frames = num_frames
-        self.num_coordinates = 4 # [x,y,w,h]
-        max_position_embeddings = (self.num_coordinates+1) * num_frames
-        self.embedding = DecoderEmbeddings(bins+2, d_model, max_position_embeddings, dropout)
+        self.num_coordinates = 4  # [x,y,w,h]
+        max_position_embeddings = (self.num_coordinates + 1) * num_frames
+        self.embedding = DecoderEmbeddings(bins + 2, d_model, max_position_embeddings, dropout)
+        self.patch_embed = PatchEmbed(
+            img_size=256, patch_size=16, in_chans=3, embed_dim=768)
 
         decoder_layer = TransformerDecoderLayer(d_model, nhead, dim_feedforward,
                                                 dropout, activation, normalize_before)
         decoder_norm = nn.LayerNorm(d_model)
         self.body = TransformerDecoder(decoder_layer, num_decoder_layers, decoder_norm,
-                                          return_intermediate=return_intermediate_dec)
+                                       return_intermediate=return_intermediate_dec)
 
         self._reset_parameters()
 
@@ -66,75 +93,16 @@ class SeqTrackDecoder(nn.Module):
 
     def forward(self, src, pos_embed, seq):
         # flatten NxCxHxW to HWxNxC
-        n, bs, c = src.shape
-        tgt = self.embedding(seq).permute(1, 0, 2)
+        src = src.permute(1, 0, 2)
+        seq = self.patch_embed(seq).permute(1, 0, 2)
 
-        query_embed = self.embedding.position_embeddings.weight.unsqueeze(1)
-        query_embed = query_embed.repeat(1, bs, 1)
-
-        memory = src
-
-        tgt_mask = generate_square_subsequent_mask(len(tgt)).to(tgt.device) #generate the causal mask
-
-        hs = self.body(tgt, memory, pos=pos_embed, query_pos=query_embed[:len(tgt)],
-                       tgt_mask=tgt_mask, memory_mask=None)
+        tgt = src
+        memory = seq
+        # two self_attention for memory; two cross_attention for tgt memory
+        hs = self.body(tgt, memory, pos=pos_embed, query_pos=pos_embed)
 
         return hs.transpose(1, 2)
 
-
-    def inference(self, src, pos_embed, seq, vocab_embed,
-                  window, seq_format):
-        # flatten NxCxHxW to HWxNxC
-        n, bs, c = src.shape
-        memory = src
-        confidence_list = []
-        box_pos = [0, 1, 2, 3] # the position of bounding box
-        center_pos = [0, 1]  # the position of x_center and y_center
-        if seq_format == 'whxy':
-            center_pos = [2, 3]
-
-        for i in range(self.num_coordinates): # only cycle 4 times, because we do not need to predict the end token during inference
-            tgt = self.embedding(seq).permute(1, 0, 2)
-            query_embed = self.embedding.position_embeddings.weight.unsqueeze(1)
-            query_embed = query_embed.repeat(1, bs, 1)
-            tgt_mask = generate_square_subsequent_mask(len(tgt)).to(tgt.device)
-
-            hs = self.body(tgt, memory, pos=pos_embed[:len(memory)], query_pos=query_embed[:len(tgt)],
-                              tgt_mask=tgt_mask, memory_mask=None)
-
-            # embedding --> likelihood
-            out = vocab_embed(hs.transpose(1, 2)[-1, :, -1, :])
-            out = out.softmax(-1)
-
-            if i in box_pos:
-                out = out[:, :self.bins] # only include the coordinate values' confidence
-
-            if ((i in center_pos) and (window!=None)):
-                out = out * window # window penalty
-
-            confidence, token_generated = out.topk(dim=-1, k=1)
-            seq = torch.cat([seq, token_generated], dim=-1)
-            confidence_list.append(confidence)
-
-        out_dict = {}
-        out_dict['pred_boxes'] = seq[:, -self.num_coordinates:] # Discard the START token, only get the bounding box
-        out_dict['confidence'] = torch.cat(confidence_list, dim=-1)[:, :]
-
-        return out_dict
-
-
-
-
-def generate_square_subsequent_mask(sz):
-    r"""Generate a square mask for the sequence. The masked positions are filled with float('-inf').
-        Unmasked positions are filled with float(0.0).
-    """
-
-    #each token only can see tokens before them
-    mask = (torch.triu(torch.ones(sz, sz)) == 1).transpose(0, 1)
-    mask = mask.float().masked_fill(mask == 0, float(
-        '-inf')).masked_fill(mask == 1, float(0.0))
-    return mask
 
 class TransformerDecoder(nn.Module):
 

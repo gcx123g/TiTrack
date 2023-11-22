@@ -5,18 +5,18 @@ cfg = edict()
 
 # MODEL
 cfg.MODEL = edict()
-cfg.MODEL.HIDDEN_DIM = 256 # hidden dimension for the decoder and vocabulary
-cfg.MODEL.BINS = 4000 # number of discrete bins
-cfg.MODEL.FEATURE_TYPE = "x" # the input feature to decoder. x, xz, or token
+cfg.MODEL.HIDDEN_DIM = 256  # hidden dimension for the decoder and vocabulary
+cfg.MODEL.BINS = 4000  # number of discrete bins
+cfg.MODEL.FEATURE_TYPE = "x"  # the input feature to decoder. x, xz, or token
 
 # MODEL.ENCODER
 # for more customization for encoder, please modify lib/models/seqtrack/vit.py
 cfg.MODEL.ENCODER = edict()
-cfg.MODEL.ENCODER.TYPE = "vit_base_patch16" # encoder model
+cfg.MODEL.ENCODER.TYPE = "vit_base_patch16"  # encoder model
 cfg.MODEL.ENCODER.DROP_PATH = 0
-cfg.MODEL.ENCODER.PRETRAIN_TYPE = "mae" # mae, default, or scratch
+cfg.MODEL.ENCODER.PRETRAIN_TYPE = "mae"  # mae, default, or scratch
 cfg.MODEL.ENCODER.STRIDE = 16
-cfg.MODEL.ENCODER.USE_CHECKPOINT = False # to save the memory.
+cfg.MODEL.ENCODER.USE_CHECKPOINT = False  # to save the memory.
 # MODEL.DECODER
 cfg.MODEL.DECODER = edict()
 cfg.MODEL.DECODER.NHEADS = 8
@@ -35,10 +35,10 @@ cfg.TRAIN.BATCH_SIZE = 8
 cfg.TRAIN.NUM_WORKER = 8
 cfg.TRAIN.OPTIMIZER = "ADAMW"
 cfg.TRAIN.ENCODER_MULTIPLIER = 0.1  # encoder's LR = this factor * LR
-cfg.TRAIN.FREEZE_ENCODER = False # for freezing the parameters of encoder
-cfg.TRAIN.ENCODER_OPEN = [] # only for debug, open some layers of encoder when FREEZE_ENCODER is True
-cfg.TRAIN.CE_WEIGHT = 1.0 # weight for cross-entropy loss
-cfg.TRAIN.PRINT_INTERVAL = 50 # interval to print the training log
+cfg.TRAIN.FREEZE_ENCODER = False  # for freezing the parameters of encoder
+cfg.TRAIN.ENCODER_OPEN = []  # only for debug, open some layers of encoder when FREEZE_ENCODER is True
+cfg.TRAIN.CE_WEIGHT = 1.0  # weight for cross-entropy loss
+cfg.TRAIN.PRINT_INTERVAL = 50  # interval to print the training log
 cfg.TRAIN.GRAD_CLIP_NORM = 0.1
 # TRAIN.SCHEDULER
 cfg.TRAIN.SCHEDULER = edict()
@@ -80,7 +80,7 @@ cfg.TEST.TEMPLATE_SIZE = 256
 cfg.TEST.SEARCH_FACTOR = 4.0
 cfg.TEST.SEARCH_SIZE = 256
 cfg.TEST.EPOCH = 500
-cfg.TEST.WINDOW = False # window penalty
+cfg.TEST.WINDOW = False  # window penalty
 cfg.TEST.NUM_TEMPLATES = 1
 
 cfg.TEST.UPDATE_INTERVALS = edict()
@@ -102,9 +102,6 @@ cfg.TEST.UPDATE_THRESHOLD.DEFAULT = 0.6
 cfg.TEST.UPDATE_THRESHOLD.VOT20 = 0.475
 cfg.TEST.UPDATE_THRESHOLD.VOT21 = 0.475
 cfg.TEST.UPDATE_THRESHOLD.VOT22 = 0.475
-
-
-
 
 
 def _edict2dict(dest_dict, src_edict):
@@ -145,5 +142,3 @@ def update_config_from_file(filename):
     with open(filename) as f:
         exp_config = edict(yaml.safe_load(f))
         _update_config(cfg, exp_config)
-
-

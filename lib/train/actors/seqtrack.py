@@ -86,6 +86,16 @@ def show_gray(image, bbox, sz):
     if cv2.waitKey() & 0xFF == ord('q'):
         pass
 
+
+def bbox_norm(search_anno, search_image):
+    b, n, _ = search_anno.shape
+    bbox = []
+    for idx in range(b):
+        w, h = search_image[idx].shape[-2, -1]
+        bbox_temp = search_anno[idx]
+    return 0
+
+
 class SeqTrackActor(BaseActor):
     """ Actor for training the SeqTrack"""
 
@@ -161,7 +171,7 @@ class SeqTrackActor(BaseActor):
                         # show_gray(temp_seq[0].unsqueeze(0), here_bboxs[i - 1], self.s_z)
                         # show_gray(temp_seq[1].unsqueeze(0), here_bboxs[i - 1], self.s_z)
                         # show_gray(temp_seq[2].unsqueeze(0), here_bboxs[i - 1], self.s_z)
-            pre_seq.append(temp_seq)
+            pre_seq.append(temp_seq.unsqueeze(0))
             x_crop.append(crop)
         return x_crop, pre_seq
 
@@ -191,51 +201,18 @@ class SeqTrackActor(BaseActor):
         template_anno = np.array([tem_anno for tem_anno in template_annos])
         search_anno = np.array([search_anno for search_anno in search_annos])
 
-        # crop
+        # crop list[b*, n, c, h, w]
         z_list = self.tem_crop(template_images, template_anno)
-        x_list, seq_info = self.search_crop(search_images, search_anno)
+        x_list, seq_list = self.search_crop(search_images, search_anno)
+        bbox_list = [torch.from_numpy(search_bbox).unsqueeze(0) for search_bbox in data['search_anno']]
 
-        feature_xz = self.net(images_list=n, mode='encoder')  # forward the encoder
+        feature_xz = self.net(z_list, x_list, mode='encoder')  # forward the encoder
 
         bins = self.BINS  # coordinate token
-        start = bins + 1  # START token
-        end = bins  # End token
-        len_embedding = bins + 2  # number of embeddings, including the coordinate tokens and the special tokens
 
-        # box of search region
-        targets = data['search_anno'].permute(1, 0, 2).reshape(-1, data['search_anno'].shape[2])  # x0y0wh
-        targets = box_xywh_to_xyxy(targets)  # x0y0wh --> x0y0x1y1
-        targets = torch.max(targets, torch.tensor([0.]).to(targets))  # Truncate out-of-range values
-        targets = torch.min(targets, torch.tensor([1.]).to(targets))
+        outputs = self.net(xz=feature_xz, seq=seq_list, mode="decoder")
 
-        # different formats of sequence, for ablation study
-        if self.seq_format != 'corner':
-            targets = box_xyxy_to_cxcywh(targets)
-
-        box = (targets * (bins - 1)).int()  # discretize the coordinates
-
-        if self.seq_format == 'whxy':
-            box = box[:, [2, 3, 0, 1]]
-
-        batch = box.shape[0]
-        # inpute sequence
-        input_start = torch.ones([batch, 1]).to(box) * start
-        input_seqs = torch.cat([input_start, box], dim=1)
-        input_seqs = input_seqs.reshape(b, n, input_seqs.shape[-1])
-        input_seqs = input_seqs.flatten(1)
-
-        # target sequence
-        target_end = torch.ones([batch, 1]).to(box) * end
-        target_seqs = torch.cat([box, target_end], dim=1)
-        target_seqs = target_seqs.reshape(b, n, target_seqs.shape[-1])
-        target_seqs = target_seqs.flatten()
-        target_seqs = target_seqs.type(dtype=torch.int64)
-
-        outputs = self.net(xz=feature_xz, seq=input_seqs, mode="decoder")
-
-        outputs = outputs[-1].reshape(-1, len_embedding)
-
-        return outputs, target_seqs
+        return outputs
 
     def compute_losses(self, outputs, targets_seq, return_status=True):
         # Get loss

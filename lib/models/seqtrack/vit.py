@@ -20,6 +20,7 @@ for some einops/einsum fun
 
 Hacked together by / Copyright 2020 Ross Wightman
 """
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.utils.model_zoo as model_zoo
@@ -31,7 +32,6 @@ from functools import partial
 from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 from timm.models.layers import DropPath, to_2tuple, trunc_normal_
 from timm.models.registry import register_model
-
 
 
 def _cfg(url='', **kwargs):
@@ -129,7 +129,7 @@ class Attention(nn.Module):
     def forward(self, x):
         B, N, C = x.shape
         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
-        q, k, v = qkv[0], qkv[1], qkv[2]   # make torchscript happy (cannot use tensor as tuple)
+        q, k, v = qkv[0], qkv[1], qkv[2]  # make torchscript happy (cannot use tensor as tuple)
 
         attn = (q @ k.transpose(-2, -1)) * self.scale
         attn = attn.softmax(dim=-1)
@@ -164,6 +164,7 @@ class Block(nn.Module):
 class PatchEmbed(nn.Module):
     """ Image to Patch Embedding
     """
+
     def __init__(self, img_size=224, patch_size=16, in_chans=3, embed_dim=768):
         super().__init__()
         img_size = to_2tuple(img_size)
@@ -188,6 +189,7 @@ class HybridEmbed(nn.Module):
     """ CNN Feature Map Embedding
     Extract feature map from CNN, flatten, project to embedding dim.
     """
+
     def __init__(self, backbone, img_size=224, feature_size=None, in_chans=3, embed_dim=768):
         super().__init__()
         assert isinstance(backbone, nn.Module)
@@ -222,6 +224,7 @@ class HybridEmbed(nn.Module):
 class VisionTransformer(nn.Module):
     """ Vision Transformer with support for patch or hybrid CNN input stage
     """
+
     def __init__(self, search_size=384, template_size=192,
                  patch_size=16, in_chans=3, num_classes=1000, embed_dim=768, depth=12,
                  num_heads=12, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop_rate=0., attn_drop_rate=0.,
@@ -279,15 +282,15 @@ class VisionTransformer(nn.Module):
         self.num_classes = num_classes
         self.head = nn.Linear(self.embed_dim, num_classes) if num_classes > 0 else nn.Identity()
 
-    def forward_features(self, images_list):
-        num_template = self.num_template
-        template_list = images_list[0:num_template]
-        search_list = images_list[num_template:]
-        num_search = len(search_list)
+    def forward_features(self, template_list, search_list):
 
+        template = torch.stack(template_list).permute(1, 0, 2, 3, 4)  # n, b, c, h, w
+        search = torch.stack(search_list).permute(1, 0, 2, 3, 4)[-2:]
+        num_template = self.num_template
+        num_search = search.shape[0]
         z_list = []
         for i in range(num_template):
-            z = template_list[i]
+            z = template[i]
             z = self.patch_embed(z)
             z = z + self.pos_embed[:, self.num_patches_search:, :]
             z_list.append(z)
@@ -295,28 +298,27 @@ class VisionTransformer(nn.Module):
 
         x_list = []
         for i in range(num_search):
-            x = search_list[i]
+            x = search[i]
             x = self.patch_embed(x)
             x = x + self.pos_embed[:, :self.num_patches_search, :]
             x_list.append(x)
         x_feat = torch.cat(x_list, dim=1)
-        xz_feat = torch.cat([x_feat, z_feat], dim=1)
+        xz_feat = torch.cat([z_feat, x_feat], dim=1)
 
         xz = self.pos_drop(xz_feat)
 
-        for blk in self.blocks:   #batch is the first dimension.
+        for blk in self.blocks:  # batch is the first dimension.
             if self.use_checkpoint:
                 xz = checkpoint.checkpoint(blk, xz)
             else:
                 xz = blk(xz)
 
-        xz = self.norm(xz) # B,N,C
+        xz = self.norm(xz)  # B,N,C
         return xz
 
-    def forward(self, images_list):
-        xz = self.forward_features(images_list)
-        out=[xz]
-        return out
+    def forward(self, z_list, x_list):
+        xz = self.forward_features(z_list, x_list)
+        return xz
 
 
 def _conv_filter(state_dict, patch_size=16):
@@ -331,7 +333,7 @@ def _conv_filter(state_dict, patch_size=16):
 
 @register_model
 def vit_base_patch16(pretrained=False, pretrain_type='default',
-                         search_size=384, template_size=192, **kwargs):
+                     search_size=384, template_size=192, **kwargs):
     patch_size = 16
     model = VisionTransformer(
         search_size=search_size, template_size=template_size,
@@ -348,9 +350,10 @@ def vit_base_patch16(pretrained=False, pretrain_type='default',
                         num_classes=model.num_classes, in_chans=kwargs.get('in_chans', 3))
     return model
 
+
 @register_model
 def vit_large_patch16(pretrained=False, pretrain_type='default',
-                              search_size=384, template_size=192, **kwargs):
+                      search_size=384, template_size=192, **kwargs):
     patch_size = 16
     model = VisionTransformer(
         search_size=search_size, template_size=template_size,
@@ -366,9 +369,10 @@ def vit_large_patch16(pretrained=False, pretrain_type='default',
         load_pretrained(model, pretrain_type, num_classes=model.num_classes, in_chans=kwargs.get('in_chans', 3))
     return model
 
+
 @register_model
 def vit_huge_patch14(pretrained=False, pretrain_type='default',
-                             search_size=364, template_size=182, **kwargs):
+                     search_size=364, template_size=182, **kwargs):
     patch_size = 14
     model = VisionTransformer(
         search_size=search_size, template_size=template_size,
@@ -385,7 +389,9 @@ def vit_huge_patch14(pretrained=False, pretrain_type='default',
                         pretrain_type, num_classes=model.num_classes, in_chans=kwargs.get('in_chans', 3))
     return model
 
-def load_pretrained(model, pretrain_type='default', cfg=None, num_classes=1000, in_chans=3, filter_fn=None, strict=True):
+
+def load_pretrained(model, pretrain_type='default', cfg=None, num_classes=1000, in_chans=3, filter_fn=None,
+                    strict=True):
     if cfg is None:
         cfg = getattr(model, 'default_cfg')
     if cfg is None or 'url' not in cfg or not cfg['url']:
@@ -451,19 +457,21 @@ def load_pretrained(model, pretrain_type='default', cfg=None, num_classes=1000, 
         del state_dict[classifier_name + '.bias']
 
     # adjust position encoding
-    pe = state_dict['pos_embed'][:,1:,:]
+    pe = state_dict['pos_embed'][:, 1:, :]
     b_pe, hw_pe, c_pe = pe.shape
     side_pe = int(math.sqrt(hw_pe))
     side_num_patches_search = int(math.sqrt(model.num_patches_search))
     side_num_patches_template = int(math.sqrt(model.num_patches_template))
-    pe_2D = pe.reshape([b_pe, side_pe, side_pe, c_pe]).permute([0,3,1,2])  #b,c,h,w
+    pe_2D = pe.reshape([b_pe, side_pe, side_pe, c_pe]).permute([0, 3, 1, 2])  # b,c,h,w
     if side_pe != side_num_patches_search:
-        pe_s_2D = nn.functional.interpolate(pe_2D, [side_num_patches_search, side_num_patches_search], align_corners=True, mode='bicubic')
-        pe_s = torch.flatten(pe_s_2D.permute([0,2,3,1]),1,2)
+        pe_s_2D = nn.functional.interpolate(pe_2D, [side_num_patches_search, side_num_patches_search],
+                                            align_corners=True, mode='bicubic')
+        pe_s = torch.flatten(pe_s_2D.permute([0, 2, 3, 1]), 1, 2)
     else:
         pe_s = pe
     if side_pe != side_num_patches_template:
-        pe_t_2D = nn.functional.interpolate(pe_2D, [side_num_patches_template, side_num_patches_template], align_corners=True, mode='bicubic')
+        pe_t_2D = nn.functional.interpolate(pe_2D, [side_num_patches_template, side_num_patches_template],
+                                            align_corners=True, mode='bicubic')
         pe_t = torch.flatten(pe_t_2D.permute([0, 2, 3, 1]), 1, 2)
     else:
         pe_t = pe
@@ -472,4 +480,3 @@ def load_pretrained(model, pretrain_type='default', cfg=None, num_classes=1000, 
     del state_dict['cls_token']
 
     model.load_state_dict(state_dict, strict=strict)
-
