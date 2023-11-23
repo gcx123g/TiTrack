@@ -75,9 +75,14 @@ class SeqTrackDecoder(nn.Module):
 
         self.sa_layer = TransformerDecoderLayer(d_model, nhead, dim_feedforward,
                                                 dropout, activation, normalize_before)
-        self.cross_layer = TransformerDecoderLayer(d_model, nhead, dim_feedforward,
+        self.cx_layer = TransformerDecoderLayer(d_model, nhead, dim_feedforward,
                                                 dropout, activation, normalize_before)
-        self.decoder_norm = nn.LayerNorm(d_model)
+        self.cy_layer = TransformerDecoderLayer(d_model, nhead, dim_feedforward,
+                                                dropout, activation, normalize_before)
+        self.cw_layer = TransformerDecoderLayer(d_model, nhead, dim_feedforward,
+                                                dropout, activation, normalize_before)
+        self.ch_layer = TransformerDecoderLayer(d_model, nhead, dim_feedforward,
+                                                dropout, activation, normalize_before)
 
         self.num = 256
         self.pos_embed_src = nn.Parameter(torch.zeros(1, self.num, d_model))
@@ -88,19 +93,19 @@ class SeqTrackDecoder(nn.Module):
         pos_embed = get_sinusoid_encoding_table(self.num, self.pos_embed.shape[-1], cls_token=False)
         self.pos_embed.data.copy_(torch.from_numpy(pos_embed).float().unsqueeze(0))
 
-        self.pos_embed1 = nn.Parameter(torch.zeros(1, self.num+1, d_model))
-        pos_embed1 = get_sinusoid_encoding_table(self.num+1, self.pos_embed1.shape[-1], cls_token=False)
+        self.pos_embed1 = nn.Parameter(torch.zeros(1, self.num + 1, d_model))
+        pos_embed1 = get_sinusoid_encoding_table(self.num + 1, self.pos_embed1.shape[-1], cls_token=False)
         self.pos_embed1.data.copy_(torch.from_numpy(pos_embed1).float().unsqueeze(0))
 
-        self.pos_embed2 = nn.Parameter(torch.zeros(1, self.num+2, d_model))
-        pos_embed2 = get_sinusoid_encoding_table(self.num+2, self.pos_embed2.shape[-1], cls_token=False)
+        self.pos_embed2 = nn.Parameter(torch.zeros(1, self.num + 2, d_model))
+        pos_embed2 = get_sinusoid_encoding_table(self.num + 2, self.pos_embed2.shape[-1], cls_token=False)
         self.pos_embed2.data.copy_(torch.from_numpy(pos_embed2).float().unsqueeze(0))
 
-        self.pos_embed3 = nn.Parameter(torch.zeros(1, self.num+3, d_model))
-        pos_embed3 = get_sinusoid_encoding_table(self.num+3, self.pos_embed3.shape[-1], cls_token=False)
+        self.pos_embed3 = nn.Parameter(torch.zeros(1, self.num + 3, d_model))
+        pos_embed3 = get_sinusoid_encoding_table(self.num + 3, self.pos_embed3.shape[-1], cls_token=False)
         self.pos_embed3.data.copy_(torch.from_numpy(pos_embed3).float().unsqueeze(0))
 
-        self.cx_embeddings= DecoderEmbeddings(2, d_model, 10, dropout)
+        self.cx_embeddings = DecoderEmbeddings(2, d_model, 10, dropout)
         self.cy_embeddings = DecoderEmbeddings(2, d_model, 10, dropout)
         self.w_embeddings = DecoderEmbeddings(2, d_model, 10, dropout)
 
@@ -126,42 +131,43 @@ class SeqTrackDecoder(nn.Module):
         for i in range(2):
             seq = self.sa_layer(seq, seq, pos_embed, pos_embed)
 
-        cx, cy, cw, ch = None, None, None, None
-        for i in range(4):
-            src = self.cross_layer(tgt=src, memory=seq, pos=pos_embed, query_pos=pos_embed_src)
-            img = src.permute(1, 0, 2)
+        # seq to coord
+        src = self.cx_layer(tgt=src, memory=seq, pos=pos_embed, query_pos=pos_embed_src)
+        img = src.permute(1, 0, 2)
+        value, cx_tmp = torch.topk(img.softmax(-2).to(img), 1, -2)
+        value, cx_tmp = torch.topk(value.squeeze(-2), 1, -1)
+        cx = cx_tmp
+        cx_tmp = (cx_tmp + 1) / 256
+        cx_seq = self.cx_embeddings(cx_tmp.long()).permute(1, 0, 2)
+        seq = torch.cat((seq, cx_seq), 0)
+        pos_embed = self.pos_embed1.permute(1, 0, 2)
 
-            if i == 0:
-                value, cx_tmp = torch.topk(img.softmax(-2).to(img), 1, -2)
-                value, cx_tmp = torch.topk(value.squeeze(-2), 1, -1)
-                cx = cx_tmp
-                cx_tmp = (cx_tmp+1)/256
-                cx_seq = self.cx_embeddings(cx_tmp.long()).permute(1, 0, 2)
-                seq = torch.cat((seq, cx_seq), 0)
-                pos_embed = self.pos_embed1.permute(1, 0, 2)
+        src = self.cy_layer(tgt=src, memory=seq, pos=pos_embed, query_pos=pos_embed_src)
+        img = src.permute(1, 0, 2)
+        value, cy_tmp = torch.topk(img.softmax(-1).to(img), 1, -1)
+        value, cy_tmp = torch.topk(value.squeeze(-1), 1, -1)
+        cy = cy_tmp
+        cy_tmp = (cy_tmp + 1) / 256
+        cy_seq = self.cy_embeddings(cy_tmp.long()).permute(1, 0, 2)
+        seq = torch.cat((seq, cy_seq), 0)
+        pos_embed = self.pos_embed2.permute(1, 0, 2)
 
-            elif i == 1:
-                value, cy_tmp = torch.topk(img.softmax(-1).to(img), 1, -1)
-                value, cy_tmp = torch.topk(value.squeeze(-1), 1, -1)
-                cy = cy_tmp
-                cy_tmp = (cy_tmp+1)/256
-                cy_seq = self.cy_embeddings(cy_tmp.long()).permute(1, 0, 2)
-                seq = torch.cat((seq, cy_seq), 0)
-                pos_embed = self.pos_embed2.permute(1, 0, 2)
+        src = self.cw_layer(tgt=src, memory=seq, pos=pos_embed, query_pos=pos_embed_src)
+        img = src.permute(1, 0, 2)
+        value, cy_tmp = torch.topk(img.softmax(-2).to(img), 1, -2)
+        value, cy_tmp = torch.topk(value.squeeze(-2), 1, -1)
+        cw = value * 256
+        w = value
+        w_seq = self.w_embeddings(w.long()).permute(1, 0, 2)
+        seq = torch.cat((seq, w_seq), 0)
+        pos_embed = self.pos_embed3.permute(1, 0, 2)
 
-            elif i == 2:
-                value, cy_tmp = torch.topk(img.softmax(-1).to(img), 1, -1)
-                value, cy_tmp = torch.topk(value.squeeze(-1), 1, -1)
-                cw = value*256
-                w = value
-                w_seq = self.w_embeddings(w.long()).permute(1, 0, 2)
-                seq = torch.cat((seq, w_seq), 0)
-                pos_embed = self.pos_embed3.permute(1, 0, 2)
-            elif i == 3:
-                value, cy_tmp = torch.topk(img.softmax(-1).to(img), 1, -1)
-                value, cy_tmp = torch.topk(value.squeeze(-1), 1, -1)
-                ch = value*256
-                h = value
+        src = self.ch_layer(tgt=src, memory=seq, pos=pos_embed, query_pos=pos_embed_src)
+        img = src.permute(1, 0, 2)
+        value, cy_tmp = torch.topk(img.softmax(-1).to(img), 1, -1)
+        value, cy_tmp = torch.topk(value.squeeze(-1), 1, -1)
+        ch = value * 256
+
         out = torch.cat((cx, cy, cw, ch), -1)
         return out
 

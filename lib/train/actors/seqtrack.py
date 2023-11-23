@@ -74,6 +74,7 @@ def show(image, bbox, sz):
     if cv2.waitKey() & 0xFF == ord('q'):
         pass
 
+
 def show_gray(image, bbox, sz):
     a = image.permute(1, 2, 0)
     import cv2
@@ -164,10 +165,10 @@ class SeqTrackActor(BaseActor):
                     self.s_z = np.ceil(np.sqrt(w_z * h_z))
 
                     if i == 1:
-                        temp_seq = torch.mean(crop[i]-crop[i-1], dim=0, keepdim=True)
+                        temp_seq = torch.mean(crop[i] - crop[i - 1], dim=0, keepdim=True)
                     else:
-                        temp_seq = torch.cat((temp_seq, torch.mean(crop[i]-crop[i-1], 0, keepdim=True)), 0)
-                        temp_seq = torch.cat((temp_seq, torch.mean(temp_seq[i-1]-crop[i-2], 0, keepdim=True)), 0)
+                        temp_seq = torch.cat((temp_seq, torch.mean(crop[i] - crop[i - 1], 0, keepdim=True)), 0)
+                        temp_seq = torch.cat((temp_seq, torch.mean(temp_seq[i - 1] - crop[i - 2], 0, keepdim=True)), 0)
                         # show_gray(temp_seq[0].unsqueeze(0), here_bboxs[i - 1], self.s_z)
                         # show_gray(temp_seq[1].unsqueeze(0), here_bboxs[i - 1], self.s_z)
                         # show_gray(temp_seq[2].unsqueeze(0), here_bboxs[i - 1], self.s_z)
@@ -194,7 +195,7 @@ class SeqTrackActor(BaseActor):
         return loss, status
 
     def forward_pass(self, data):
-        n, b = data['num_frames'][0], len(data['search_images'])
+
         template_images, template_annos = data['template_images'], data['template_anno']
         search_images, search_annos = data['search_images'], data['search_anno']
 
@@ -205,13 +206,17 @@ class SeqTrackActor(BaseActor):
         z_list = self.tem_crop(template_images, template_anno)
         x_list, seq_list = self.search_crop(search_images, search_anno)
         bbox_list = [torch.from_numpy(search_bbox)[-1] for search_bbox in data['search_anno']]
+        pre_list = [torch.from_numpy(search_bbox)[-2] for search_bbox in data['search_anno']]
 
         feature_xz = self.net(z_list, x_list, mode='encoder')  # forward the encoder
 
         outputs = self.net(xz=feature_xz, seq=seq_list, mode="decoder")
-        targets = torch.stack(bbox_list, 0)
 
-        return outputs, targets
+        pres = torch.stack(pre_list, 0)
+        targets = torch.stack(bbox_list, 0)
+        predicts = self.to_predicts(outputs, pres)
+
+        return predicts, targets
 
     def compute_losses(self, outputs, targets_seq, return_status=True):
         # Get loss
@@ -235,6 +240,20 @@ class SeqTrackActor(BaseActor):
             return loss, status
         else:
             return loss
+
+    def to_predicts(self, outputs, pres):
+
+        w_z = pres[:, 2] * self.search_factor
+        h_z = pres[:, 3] * self.search_factor
+        s_z = np.ceil(np.sqrt(w_z * h_z)).unsqueeze(-1)
+        s_z = torch.cat((s_z, s_z), -1).to(outputs)
+
+        pres = pres.to(outputs)
+        center = pres[:, :2]+pres[:, 2:]/2+(outputs[:, :2]-self.search_size/2)*(s_z/self.search_size)
+        w_h = outputs[:, 2:]*s_z/self.search_size
+        predicts = torch.cat((center, w_h), -1)
+        predicts = torch.cat(predicts[:, :2]-predicts[:, 2:]/2)
+        return torch.floor(predicts)
 
     def to(self, device):
         """ Move the network to device
