@@ -88,7 +88,7 @@ class LTRTrainer(BaseTrainer):
             torch.cuda.synchronize()
 
             # update statistics
-            batch_size = data['template_images'].shape[loader.stack_dim]
+            batch_size = len(data['template_images'])
             self._update_stats(stats, batch_size, loader)
 
             # print statistics
